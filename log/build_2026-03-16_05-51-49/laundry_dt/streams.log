@@ -1,0 +1,20 @@
+[1.145s] Invoking command in '/root/ros2_ws/src/laundry_dt': PYTHONPATH=/root/ros2_ws/build/laundry_dt/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/root/ros2_ws/install/laundry_dt/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/laundry_dt build --build-base /root/ros2_ws/build/laundry_dt/build install --record /root/ros2_ws/build/laundry_dt/install.log --single-version-externally-managed install_data
+[1.530s] running egg_info
+[1.532s] writing ../../build/laundry_dt/laundry_dt.egg-info/PKG-INFO
+[1.532s] writing dependency_links to ../../build/laundry_dt/laundry_dt.egg-info/dependency_links.txt
+[1.533s] writing entry points to ../../build/laundry_dt/laundry_dt.egg-info/entry_points.txt
+[1.533s] writing requirements to ../../build/laundry_dt/laundry_dt.egg-info/requires.txt
+[1.534s] writing top-level names to ../../build/laundry_dt/laundry_dt.egg-info/top_level.txt
+[1.536s] reading manifest file '../../build/laundry_dt/laundry_dt.egg-info/SOURCES.txt'
+[1.540s] writing manifest file '../../build/laundry_dt/laundry_dt.egg-info/SOURCES.txt'
+[1.542s] running build
+[1.543s] running build_py
+[1.544s] running install
+[1.544s] running install_lib
+[1.544s] running install_data
+[1.546s] running install_egg_info
+[1.548s] removing '/root/ros2_ws/install/laundry_dt/lib/python3.10/site-packages/laundry_dt-0.0.0-py3.10.egg-info' (and everything under it)
+[1.552s] Copying ../../build/laundry_dt/laundry_dt.egg-info to /root/ros2_ws/install/laundry_dt/lib/python3.10/site-packages/laundry_dt-0.0.0-py3.10.egg-info
+[1.571s] running install_scripts
+[1.613s] writing list of installed files to '/root/ros2_ws/build/laundry_dt/install.log'
+[1.640s] Invoked command in '/root/ros2_ws/src/laundry_dt' returned '0': PYTHONPATH=/root/ros2_ws/build/laundry_dt/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/root/ros2_ws/install/laundry_dt/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/laundry_dt build --build-base /root/ros2_ws/build/laundry_dt/build install --record /root/ros2_ws/build/laundry_dt/install.log --single-version-externally-managed install_data

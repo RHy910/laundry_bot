@@ -1,0 +1,5 @@
+  File "/root/ros2_ws/install/laundry_dt/lib/python3.10/site-packages/laundry_dt/dc_motor_subscriber.py", line 8
+    self.subscriber = self.create_subscription(Twist,'/cmd_vel', self.cmd_callback,10):
+                                                                                      ^
+SyntaxError: invalid syntax
+
