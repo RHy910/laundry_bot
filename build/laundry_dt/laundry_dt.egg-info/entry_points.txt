@@ -1,5 +1,0 @@
-[console_scripts]
-dc_motor_controller = laundry_dt.dc_motor_controller:main
-dc_motor_subscriber = laundry_dt.dc_motor_subscriber:main
-ultrasonic_publisher = laundry_dt.ultrasonic_publisher:main
-
