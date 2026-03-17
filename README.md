@@ -1,4 +1,4 @@
-[laundry_dt_readme.md](https://github.com/user-attachments/files/26049565/laundry_dt_readme.md)
+download: [laundry_dt_readme.md](https://github.com/user-attachments/files/26049565/laundry_dt_readme.md)
 # laundry_dt — Autonomous Laundry Robot & Digital Twin
 
 > A ROS 2-based autonomous segmented robot that handles the full laundry lifecycle — stair navigation, machine loading, wash/dry cycle monitoring, and delivery back to the user. Built with a real-time digital twin pipeline mirroring physical hardware state in simulation.
