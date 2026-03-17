@@ -132,6 +132,20 @@ The robot uses a **segmented inchworm approach** — front, mid, and back segmen
    └─ Cycle continues until top of staircase
 ```
 
+### Motor Behavior Per State
+
+| State | Front DC | Mid DC | Back DC | Front Stepper | Back Stepper |
+|---|---|---|---|---|---|
+| `IDLE` | STOP | STOP | STOP | HOLD | HOLD |
+| `MOVING_FORWARD` | FORWARD | FORWARD | FORWARD | HOLD | HOLD |
+| `STAIR_DETECTED` | STOP | STOP | STOP | HOLD | HOLD |
+| `FRONT_LIFTING` | STOP | STOP | STOP | UP | HOLD |
+| `FRONT_ADVANCING` | FORWARD | HOLD | HOLD | HOLD | HOLD |
+| `MID_LIFTING` | STOP | STOP | STOP | DOWN | UP |
+| `MID_ADVANCING` | HOLD | FORWARD | HOLD | HOLD | HOLD |
+| `BACK_LIFTING` | STOP | STOP | STOP | HOLD | DOWN |
+| `BACK_ADVANCING` | HOLD | HOLD | FORWARD | HOLD | HOLD |
+
 ### Key Design Decisions
 
 **Non-uniform stair handling** — each segment independently measures its own stair height via stepper dead reckoning + ultrasonic feedback on every single stair. No assumption of uniform stair height. This enables reliable navigation of real-world staircases.
