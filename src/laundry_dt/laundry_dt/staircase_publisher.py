@@ -1,69 +1,92 @@
 import rclpy
+import random
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 
-# ── Staircase config ──────────────────────────────────────────────────────────
-# Each entry is the distance (cm) the sensor reads at that simulated position.
-# Positions advance every TICK_RATE seconds.
-# Values < 10 = stair detected. Values > 10 = clear.
-#
-# Layout: robot moves left → right through this timeline.
-# front sensor is always SEGMENT_SPACING ticks ahead of mid, mid ahead of back.
+TICK_RATE        = 0.3
+START_DIST       = 300
+STAIR_THRESHOLD  = 8
+DECREMENT        = 20
+NUM_STAIRS      = 0
+STAIR_HEIGHT_MIN = 500
+STAIR_HEIGHT_MAX = 1500
 
-SEGMENT_SPACING = 5   # ticks between segments (simulates physical separation)
-TICK_RATE       = 0.3  # seconds per tick
-
-# Simulated front sensor readings — mid and back follow with offset
-FRONT_TIMELINE = [
-    300, 300, 300, 300, 300,   # flat ground — all moving forward
-    8,                          # STAIR 1: front hits it
-    300, 300, 300, 300, 300,   # front cleared stair 1, advancing
-    8,                          # STAIR 2: front hits it
-    300, 300, 300, 300, 300,   # front cleared stair 2
-    8,                          # STAIR 3: front hits it
-    300, 300, 300, 300, 300,   # front cleared stair 3
-    300, 300, 300, 300, 300,   # flat at top — done
-]
 
 class StaircasePublisher(Node):
     def __init__(self):
         super().__init__('staircase_publisher')
 
         self.segments = ['front', 'mid', 'back']
+
+        # pointer = which stair this segment is currently approaching
+        # only front starts at 1 (approaching stair 1), others wait
+        self.pointers = {'front': 1, 'mid': 0, 'back': 0}
+
+        # current reading per segment — decrements each tick toward threshold
+        self.readings = {'front': START_DIST, 'mid': START_DIST, 'back': START_DIST}
+
+        # ultrasonic publishers
         self.ultra_pub = {
             seg: self.create_publisher(Float32, f'ultrasonic/{seg}/distance', 10)
             for seg in self.segments
         }
 
-        # each segment reads from the timeline at a different offset
-        self.tick = 0
-        self.offsets = {
-            'front': 0,
-            'mid':   SEGMENT_SPACING,
-            'back':  SEGMENT_SPACING * 2,
-        }
+        # stepper feedback — simulates front measuring stair height
+        self.stepper_pub = self.create_publisher(Float32, 'stepper/front/steps', 10)
+
+        # lift confirmations from robot controller
+        self.lift_sub = self.create_subscription(
+            String, '/segment_lifted', self.on_lift, 10
+        )
 
         self.timer = self.create_timer(TICK_RATE, self.publish_tick)
         self.get_logger().info('Staircase Publisher Started')
 
-    def get_reading(self, seg):
-        idx = max(0, self.tick - self.offsets[seg])
-        if idx >= len(FRONT_TIMELINE):
-            return 300.0  # past the end — open space
-        return float(FRONT_TIMELINE[idx])
+    def on_lift(self, msg):
+        seg = msg.data
+        if seg not in self.pointers:
+            return
+
+        self.pointers[seg] += 1        # advance to next stair
+        self.readings[seg] = START_DIST  # reset reading for next approach
+
+        self.get_logger().info(
+            f'[{seg}] lifted — now approaching stair {self.pointers[seg]}'
+        )
+
+        # unlock next segment
+        if seg == 'front' and self.pointers['mid'] == 0:
+            self.pointers['mid'] = 1
+            self.get_logger().info('[mid] unlocked — starting approach')
+        elif seg == 'mid' and self.pointers['back'] == 0:
+            self.pointers['back'] = 1
+            self.get_logger().info('[back] unlocked — starting approach')
+
+        # front publishes random stair height for controller to store
+        if seg == 'front':
+            height = float(random.randint(STAIR_HEIGHT_MIN, STAIR_HEIGHT_MAX))
+            step_msg = Float32()
+            step_msg.data = height
+            self.stepper_pub.publish(step_msg)
+            self.get_logger().info(f'[front] stair height: {height} steps')
 
     def publish_tick(self):
         for seg in self.segments:
+            # only decrement if unlocked and not past last stair
+            if self.pointers[seg] > 0 and self.pointers[seg] <= NUM_STAIRS+1:
+                if self.readings[seg] > STAIR_THRESHOLD:
+                    self.readings[seg] -= DECREMENT
+                    self.readings[seg] = max(self.readings[seg], STAIR_THRESHOLD)
+            elif self.pointers[seg] > NUM_STAIRS+1:
+                # past last stair — send 301 as explicit landing signal
+                self.readings[seg] = 301
+
             msg = Float32()
-            msg.data = self.get_reading(seg)
+            msg.data = float(self.readings[seg])
             self.ultra_pub[seg].publish(msg)
-            self.get_logger().info(f'[{seg}] dist: {msg.data}')
-
-        self.tick += 1
-
-        if self.tick > len(FRONT_TIMELINE) + SEGMENT_SPACING * 2 + 5:
-            self.get_logger().info('Staircase complete — shutting down simulator')
-            raise SystemExit
+            self.get_logger().info(
+                f'[{seg}] dist: {msg.data} | stair: {self.pointers[seg]}'
+            )
 
 
 def main():

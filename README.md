@@ -1,11 +1,10 @@
-download: [laundry_dt_readme.md](https://github.com/user-attachments/files/26049565/laundry_dt_readme.md)
 # laundry_dt — Autonomous Laundry Robot & Digital Twin
 
 > A ROS 2-based autonomous segmented robot that handles the full laundry lifecycle — stair navigation, machine loading, wash/dry cycle monitoring, and delivery back to the user. Built with a real-time digital twin pipeline mirroring physical hardware state in simulation.
 
 ---
 
-##  Concept
+## Concept
 
 Laundry is one of the last fully manual household chores. Existing "smart" appliances only automate the washing itself — someone still has to load, transfer, and deliver. `laundry_dt` rethinks the entire pipeline.
 
@@ -13,24 +12,25 @@ The robot is a **3-segment autonomous platform** with a detachable drum that mou
 
 ---
 
-##  System Architecture
+## System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    laundry_dt ROS 2 Stack                    │
 │                                                             │
 │  [Ultrasonic Publisher] ──/ultrasonic/{pos}/distance──►     │
-│  [Camera Publisher]     ──/camera/image_raw──►              │
+│  [Staircase Publisher]  ──/ultrasonic/{pos}/distance──►     │
+│                         ──/stepper/front/steps──►           │
 │                                   │                         │
 │                          [Robot Controller]                 │
 │                          (state machine)                    │
-│                    ┌──────────┴──────────┐                  │
-│                    ▼                     ▼                  │
-│       [DC Motor Controller]    [Stepper Controller]         │
-│         /{pos}/cmd_vel           /stepper/{pos}/cmd         │
-│                    │                     │                  │
-│                    ▼                     ▼                  │
-│       [DC Motor Subscriber]   [Stepper Subscriber]          │
+│          ┌───────────────┬─────────┴──────────┐            │
+│          ▼               ▼                    ▼            │
+│  [DC Motor Controller] [Stepper Controller] [Winch]        │
+│    /{pos}/cmd_vel      /stepper/{pos}/cmd  /mid/winch/cmd  │
+│          │               │                                  │
+│          ▼               ▼                                  │
+│  [DC Motor Subscriber] [Stepper Subscriber]                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,121 +38,153 @@ The robot is a **3-segment autonomous platform** with a detachable drum that mou
 
 | Node | Publishes | Subscribes To | Role |
 |---|---|---|---|
-| `ultrasonic_publisher` | `/ultrasonic/front/distance` `/ultrasonic/mid/distance` `/ultrasonic/back/distance` | — | Per-segment obstacle & stair detection |
-| `robot_controller` | `/{pos}/cmd_vel` `/stepper/{pos}/cmd` | `/ultrasonic/{pos}/distance` `/stepper/{pos}/steps` | Central state machine brain |
-| `dc_motor_controller` | `/{pos}/motors/dc/status` | `/{pos}/cmd_vel` | Per-segment drive control |
-| `stepper_controller` | `/stepper/{pos}/steps` | `/stepper/{pos}/cmd`  && `mid/winch/cmd` | Per-segment precision lift control |
-| `dc_motor_subscriber` | — | `/{pos}/cmd_vel` | Motor state monitoring |
-|||||
+| `ultrasonic_publisher` | `/ultrasonic/{pos}/distance` | — | Simulated per-segment distance readings (random, for testing) |
+| `staircase_publisher` | `/ultrasonic/{pos}/distance` `/stepper/front/steps` | `/segment_lifted` | Simulates a realistic staircase — decrements readings as segments approach, publishes stair heights, unlocks segments on lift confirmation |
+| `robot_controller` | `/{pos}/cmd_vel` `/stepper/{pos}/cmd` `/mid/winch/cmd` `/segment_lifted` | `/ultrasonic/{pos}/distance` `/stepper/{pos}/steps` | Central state machine brain — drives FSM transitions, coordinates all segment movement |
+| `dc_motor_controller` | `/{pos}/cmd_vel` | `/ultrasonic/{pos}/distance` | Reactive per-segment drive controller — independently stops a segment when its ultrasonic reads below threshold |
+| `stepper_controller` | `/stepper/{pos}/steps` `/mid/winch/steps` | `/stepper/{pos}/cmd` `/mid/winch/cmd` | Relays stepper and winch commands, echoes back step counts |
+| `dc_motor_subscriber` | — | `/{pos}/cmd_vel` | Motor state monitoring / logging |
+| `stepper_subscriber` | — | `/stepper/{pos}/cmd` | Stepper command monitoring / logging |
 
 ---
 
-##  Hardware
+## Hardware
 
 ### Physical Components
 
 | Component | Quantity | Role |
 |---|---|---|
-| HC-SR04 Ultrasonic | 6 | One per segment — obstacle avoidance + stair measurement |
+| HC-SR04 Ultrasonic | 6 | Two per segment — one forward-facing (obstacle/stair detection), one downward-facing (step-down detection for descending) |
 | DC Motors | 7 | Locomotion per segment + winch pull on mid segment (1) |
-| Stepper Motors | 2 | Precision lift mechanism per segment for stair climbing |
-
+| Stepper Motors | 2 | Precision lift mechanism — front and back segments |
 
 ### Sensor Layout
 
 | Sensor | Position | Direction | Purpose |
 |---|---|---|---|
-| `front` | Front segment | Forward | Stair/obstacle detection |
-| `mid` | Mid segment | Forward | Stair/obstacle detection |
-| `back` | Rear segment | Forward | Stair/obstacle detection |
+| `front_forward` | Front segment | Forward | Stair/obstacle detection, stair height scouting |
+| `mid_forward` | Mid segment | Forward | Stair/obstacle detection |
+| `back_forward` | Rear segment | Forward | Stair/obstacle detection |
+| `front_down` | Front segment | Downward | Step-down detection for stair descent |
+| `mid_down` | Mid segment | Downward | Step-down detection for stair descent |
+| `back_down` | Rear segment | Downward | Step-down detection for stair descent |
 
-Each ultrasonic faces forward. Stair detection uses distance **increase** (floor dropping away) combined with stepper dead reckoning for vertical positioning.
+Forward-facing sensors detect stairs and obstacles — stair detection triggers when distance drops below `stair_threshold` (default: 10 cm). Downward-facing sensors detect when a segment is over a stair edge during descent, triggering the lowering sequence for that segment.
 
 ---
 
-##  State Machine
+## State Machine
 
 The `robot_controller` node manages a finite state machine (FSM) that governs all robot behavior.
 
 ```python
 class RobotState(Enum):
-    IDLE             = 0
-    ADVANCING        = 1
-    LIFTING          = 2
-    SEGMENT_FORWARD  = 3
-    BACK_WINCHING    = 4
-    COMPLETE         = 5
+    IDLE             = 0   # waiting to start
+    ADVANCING        = 1   # all segments driving forward
+    LIFTING          = 2   # active segment lifting, waiting to clear threshold
+    SEGMENT_FORWARD  = 3   # all segments moving to next position
+    BACK_WINCHING    = 4   # winch pulling back segment before it advances
+    COMPLETE         = 5   # all segments at top, climb finished
 ```
 
 ---
 
-##  Stair Climbing Algorithm
+## Stair Climbing Algorithm
 
-The robot uses a **segmented inchworm approach** — front, mid, and back segments leapfrog each other up the staircase independently.
+The robot uses a **segmented inchworm approach** — front, mid, and back segments leapfrog each other up the staircase, coordinated by `get_active_seg()` and a per-segment level tracker.
 
-### Per-Stair Cycle (repeats for every stair, every segment)
+### Active Segment Logic (`get_active_seg`)
+
+Each segment tracks which stair level it's on. The active segment — the one that should act next — is determined by the level relationship between segments:
 
 ```
-1. STAIR_DETECTED
-   └─ Ultrasonic reads distance increase (floor drops away)
-   
-2. FRONT_LIFTING
-   └─ Front stepper lifts, counting steps
-   └─ Ultrasonic clears threshold → record step count as stair height
-   └─ Add fixed offset for front segment physical size
-   
-3. FRONT_ADVANCING
-   └─ Front DC motors drive forward
-   └─ Front ultrasonic detects next stair edge → stop
-   
-4. MID_LIFTING
-   └─ Mid stepper lifts using same measurement process
-   └─ Mid advances to where front segment was
-   
-5. FRONT_LIFTING (again)
-   └─ Front lifts to next stair, advances to stair 3 position
-   
-6. BACK_LIFTING
-   └─ Back stepper lifts, advances to stair 1 position
-   
-7. REPEAT
-   └─ Cycle continues until top of staircase
+levels {f:1, m:1, b:1} → active: front   (front == mid, front leads)
+levels {f:2, m:1, b:1} → active: mid     (front > mid, mid == back)
+levels {f:2, m:2, b:1} → active: back    (front == mid > back)
+levels {f:3, m:2, b:1} → active: back    (front > mid > back)
+levels {f:3, m:2, b:2} → active: mid     (front > mid, mid == back)
+levels {f:3, m:3, b:2} → active: front   (front == mid > back)
 ```
+
+Level order is always enforced as `front >= mid >= back`. Any violation is logged as an error.
+
+### Per-Stair Cycle
+
+```
+1. IDLE → ADVANCING
+   └─ First ultrasonic reading received — all segments start driving forward
+
+2. ADVANCING
+   └─ Active segment ultrasonic drops below stair_threshold
+   └─ All segments halt → state → LIFTING
+   └─ front: step_up(999) to scout stair height; scouting_level stored
+   └─ mid/back: step using stored stair_heights[target_level]
+
+3. LIFTING
+   └─ Active segment ultrasonic clears threshold → segment has climbed the stair
+   └─ All segments drive forward → state → SEGMENT_FORWARD
+
+4. SEGMENT_FORWARD
+   └─ Each segment halts when it detects the next stair OR travels a full segment_length (dead reckoning cutoff)
+   └─ front_at_top flag set if ultrasonic reads > 300 (landing signal)
+   └─ When all segments stopped → level[active] += 1
+   └─ Next active segment determined:
+        if next_active == 'back' → state → BACK_WINCHING
+        else → do_lift(next_active) → state → LIFTING
+
+5. BACK_WINCHING
+   └─ Winch fires to pull back segment
+   └─ After winch_duration seconds → back drives forward → state → ADVANCING
+
+6. COMPLETE
+   └─ front_at_top == True and all levels equal → climb finished
+```
+
+### Stepper Behavior Per Segment
+
+| Segment Being Lifted | Front Stepper | Back Stepper |
+|---|---|---|
+| `front` | UP (scout — step_up 999) | HOLD |
+| `mid` | DOWN (lowers front to release mid) | UP (raises back, lifts mid) |
+| `back` | HOLD | DOWN (lowers back segment) |
 
 ### Motor Behavior Per State
 
 | State | Front DC | Mid DC | Back DC | Front Stepper | Back Stepper |
 |---|---|---|---|---|---|
 | `IDLE` | STOP | STOP | STOP | HOLD | HOLD |
-| `MOVING_FORWARD` | FORWARD | FORWARD | FORWARD | HOLD | HOLD |
-| `STAIR_DETECTED` | STOP | STOP | STOP | HOLD | HOLD |
-| `FRONT_LIFTING` | STOP | STOP | STOP | UP | HOLD |
-| `FRONT_ADVANCING` | FORWARD | HOLD | HOLD | HOLD | HOLD |
-| `MID_LIFTING` | STOP | STOP | STOP | DOWN | UP |
-| `MID_ADVANCING` | HOLD | FORWARD | HOLD | HOLD | HOLD |
-| `BACK_LIFTING` | STOP | STOP | STOP | HOLD | DOWN |
-| `BACK_ADVANCING` | HOLD | HOLD | FORWARD | HOLD | HOLD |
+| `ADVANCING` | FORWARD | FORWARD | FORWARD | HOLD | HOLD |
+| `LIFTING` | STOP | STOP | STOP | per table above | per table above |
+| `SEGMENT_FORWARD` | FORWARD | FORWARD | FORWARD | HOLD | HOLD |
+| `BACK_WINCHING` | STOP | STOP (winch active) | STOP | HOLD | HOLD |
+| `COMPLETE` | STOP | STOP | STOP | HOLD | HOLD |
 
 ### Key Design Decisions
 
-**Non-uniform stair handling** — each segment independently measures its own stair height via stepper dead reckoning + ultrasonic feedback on every single stair. No assumption of uniform stair height. This enables reliable navigation of real-world staircases.
+**Scouting on every stair** — front always lifts to scout before mid and back use the stored height. This means no assumption of uniform stair height and reliable navigation of real-world staircases.
 
-**Stepper as position encoder** — steppers move in precise increments so step count = exact vertical displacement. No additional height sensor needed. The ultrasonic detects *when* to stop lifting; the stepper tracks *how much* it lifted.
+**Stepper as position encoder** — step count equals exact vertical displacement. The ultrasonic detects *when* to stop lifting; the stepper tracks *how much* it lifted. Heights are stored in `stair_heights[level]`.
 
-**Per-segment independence** — front, mid, and back can be climbing different-height stairs simultaneously, which is the realistic scenario on any real staircase.
+**Dead reckoning cutoff** — if no stair is detected after traveling `segment_length` cm (default: 30 cm), the segment halts anyway. This handles the landing at the top of the staircase.
+
+**Landing detection** — when the front ultrasonic reads > 300, `front_at_top` is set. Once all segments reach the same level with this flag set, the climb is marked `COMPLETE`.
+
+**Back winch** — when back is the next active segment, a winch motor pulls it before it drives forward, allowing it to advance without requiring a full lift cycle.
 
 ### Data Flow for Stair Climbing
 
-| Topic | Data | Used by |
+| Topic | Data | Direction |
 |---|---|---|
-| `/ultrasonic/{pos}/distance` | Raw distance (cm) | `robot_controller` |
-| `/stepper/{pos}/steps` | Current step count | `robot_controller` |
-| `/stepper/{pos}/cmd` | Target steps to move | `stepper_controller` |
-| `/{pos}/cmd_vel` | Linear/angular velocity | `dc_motor_controller` |
+| `/ultrasonic/{pos}/distance` | Raw distance (cm) | → `robot_controller` |
+| `/stepper/{pos}/steps` | Live step count feedback | → `robot_controller` |
+| `/stepper/{pos}/cmd` | Target steps (positive = up, negative = down) | `robot_controller` → `stepper_controller` |
+| `/{pos}/cmd_vel` | Linear velocity (Twist) | `robot_controller` → `dc_motor_controller` |
+| `/mid/winch/cmd` | Winch step count | `robot_controller` → `stepper_controller` |
+| `/segment_lifted` | Segment name string | `robot_controller` → `staircase_publisher` |
 
 ---
 
-##  Laundry Lifecycle (Future States)
+## Laundry Lifecycle (Future States)
 
 ```
 [Pickup]
@@ -169,7 +201,7 @@ The robot uses a **segmented inchworm approach** — front, mid, and back segmen
 
 ---
 
-##  Getting Started
+## Getting Started
 
 ### Prerequisites
 - Docker
@@ -209,22 +241,25 @@ ros2 run rqt_graph rqt_graph
 ```bash
 ros2 topic echo /ultrasonic/front/distance
 ros2 topic echo /front/cmd_vel
+ros2 topic echo /stepper/front/steps
 ```
 
 ---
 
-##  Project Structure
+## Project Structure
 
 ```
 laundry_dt/
 ├── laundry_dt/
 │   ├── __init__.py
-│   ├── ultrasonic_publisher.py     # 3-sensor pub with dict comprehension
-│   ├── camera_publisher.py         # Visual data publisher
-│   ├── dc_motor_controller.py      # Reactive per-segment motor controller
-│   ├── dc_motor_subscriber.py      # Per-segment motor state monitor
-│   ├── stepper_controller.py       # Precision lift controller (WIP)
-│   └── robot_controller.py         # Central FSM brain (WIP)
+│   ├── ultrasonic_publisher.py     # Simulated 3-sensor publisher (random values, for unit testing)
+│   ├── staircase_publisher.py      # Realistic staircase simulator for FSM testing
+│   ├── dc_motor_controller.py      # Reactive per-segment motor controller (ultrasonic-driven)
+│   ├── dc_motor_subscriber.py      # Per-segment motor state monitor / logger
+│   ├── stepper_controller.py       # Stepper + winch relay with step count feedback
+│   ├── stepper_subscriber.py       # Stepper command monitor / logger
+│   ├── robot_state.py              # RobotState enum (shared)
+│   └── robot_controller.py         # Central FSM brain — stair climbing state machine
 ├── launch/
 │   └── launch.py                   # Single-command full system launch
 ├── package.xml
@@ -239,10 +274,13 @@ laundry_dt/
 - [x] Per-segment topic architecture using dictionary comprehensions
 - [x] Lambda callbacks for position-aware subscriptions
 - [x] Single launch file for full system startup
-- [x] State machine design (FSM defined, implementation in progress)
-- [ ] `robot_controller` node — central FSM implementation
-- [ ] Stepper dead reckoning — step count → vertical displacement
-- [ ] Stair climbing algorithm implementation
+- [x] State machine design and implementation (FSM with 6 states)
+- [x] `robot_controller` node — active segment logic, level tracking, lift coordination
+- [x] Stepper dead reckoning — step count → vertical displacement
+- [x] Stair height scouting — front stepper measures each stair on first lift
+- [x] Staircase simulator (`staircase_publisher`) for closed-loop FSM testing
+- [x] Dead reckoning cutoff — segment_length-based halt when no stair detected
+- [x] Landing detection — `front_at_top` flag via ultrasonic > 300 signal
 - [ ] Gazebo simulation — virtual laundry_dt mirroring physical state
 - [ ] rosbridge integration — live ESP32 hardware data into ROS 2 topics
 - [ ] AWS S3 sensor data logging pipeline
@@ -253,9 +291,11 @@ laundry_dt/
 
 ## Known Limitations & Future Work
 
-- Camera-based stair geometry detection not yet implemented — currently relies purely on ultrasonic distance thresholds
-- Downstairs navigation is a separate algorithm not yet designed
+- Camera-based stair geometry detection not yet implemented — currently relies purely on ultrasonic distance thresholds and stepper dead reckoning
+- Stair height scouting currently uses only the front stepper; mid and back rely on the front's stored measurements rather than independently measuring
+- Downstairs navigation hardware is in place (downward-facing ultrasonics per segment) — descent algorithm not yet designed
 - Drum detach/attach mechanism is mechanical — software integration pending hardware build
+- `robot_controller2.py` is an in-progress experimental refactor and not part of the active system
 
 ---
 

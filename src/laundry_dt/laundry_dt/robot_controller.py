@@ -1,6 +1,6 @@
 import rclpy
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, String
 from rclpy.node import Node
 from enum import Enum
 
@@ -20,7 +20,7 @@ class RobotController(Node):
 
         self.state    = RobotState.IDLE
         self.segments = ['front', 'mid', 'back']
-        self.steppers = ['front', 'back']  # front stepper on mid segment
+        self.steppers = ['front', 'back']
 
         self.level   = {'front': 0, 'mid': 0, 'back': 0}
         self.stopped = {'front': True, 'mid': True, 'back': True}
@@ -34,6 +34,16 @@ class RobotController(Node):
         self.clearance_offset = 20
         self.winch_steps      = 200
         self.winch_count      = 0
+        self.winch_duration   = 3.0
+        self.winch_start_time = None
+
+        # ── dead reckoning ────────────────────────────────────────────
+        self.drive_speed      = 0.5
+        self.segment_length   = 30.0
+        self.drive_start_time = {'front': None, 'mid': None, 'back': None}
+
+        # ── top detection ─────────────────────────────────────────────
+        self.front_at_top = False
 
         # ── publishers / subscribers ──────────────────────────────────
         self.motor_pub   = {}
@@ -52,7 +62,7 @@ class RobotController(Node):
                 10
             )
 
-        for stp in self.steppers:  # fix: was using wrong variable name
+        for stp in self.steppers:
             self.stepper_pub[stp] = self.create_publisher(
                 Float32, f'stepper/{stp}/cmd', 10
             )
@@ -64,6 +74,7 @@ class RobotController(Node):
             )
 
         self.winch_pub = self.create_publisher(Float32, '/mid/winch/cmd', 10)
+        self.lift_pub  = self.create_publisher(String, '/segment_lifted', 10)
         self.get_logger().info('Robot Controller Started')
 
     # ── helpers ───────────────────────────────────────────────────────
@@ -72,18 +83,27 @@ class RobotController(Node):
         cmd = Twist()
         cmd.linear.x = speed
         self.stopped[seg] = False
+        self.drive_start_time[seg] = self.get_clock().now()
         self.motor_pub[seg].publish(cmd)
 
     def halt(self, seg):
         self.motor_pub[seg].publish(Twist())
         self.stopped[seg] = True
+        self.drive_start_time[seg] = None
         self.get_logger().info(f'*** [{seg}] stopped ***')
 
     def stop_all(self):
         for seg in self.segments:
             self.motor_pub[seg].publish(Twist())
             self.stopped[seg] = True
+            self.drive_start_time[seg] = None
         self.get_logger().info('*** all stopped ***')
+
+    def distance_traveled(self, seg):
+        if self.drive_start_time[seg] is None:
+            return 0.0
+        elapsed = (self.get_clock().now() - self.drive_start_time[seg]).nanoseconds / 1e9
+        return elapsed * self.drive_speed * 100.0
 
     def step_up(self, stp, steps):
         cmd = Float32()
@@ -99,41 +119,44 @@ class RobotController(Node):
         cmd = Float32()
         cmd.data = float(self.winch_steps)
         self.winch_pub.publish(cmd)
+        self.winch_start_time = self.get_clock().now()
         self.get_logger().info(f'Winch activated — {self.winch_steps} steps')
 
     def do_lift(self, seg):
         """Execute a lift for the given segment using stored stair height."""
-        if self.level[seg] not in self.stair_heights:
-            self.get_logger().error(
-                f'[{seg}] cannot lift — no height stored for level {self.level[seg]}'
-            )
-            return
-
-        steps = self.stair_heights[self.level[seg]]
-
         if seg == 'front':
-            self.step_up('front', steps)
-        elif seg == 'mid':
-            self.step_down('front', steps)  # front stepper lowers → lifts mid
-            self.step_up('back', steps)     # back stepper raises → lifts mid
-        else:
-            self.step_down('back', steps)   # back stepper lowers back segment
+            self.scouting_level = self.level['front'] + 1
+            self.step_up('front', 999.0)
+            self.get_logger().info(f'[front] scouting stair {self.scouting_level}')
+            lift_msg = String()
+            lift_msg.data = 'front'
+            self.lift_pub.publish(lift_msg)
+            return True
 
-        
+        target_level = self.level[seg] + 1
+        if target_level not in self.stair_heights:
+            self.get_logger().error(
+                f'[{seg}] cannot lift — no height stored for level {target_level}'
+            )
+            return False
+
+        steps = self.stair_heights[target_level]
+
+        if seg == 'mid':
+            self.step_down('front', steps)
+            self.step_up('back', steps)
+        else:
+            self.step_down('back', steps)
+
         self.get_logger().info(
             f'[{seg}] lifting → level {self.level[seg]} | steps: {steps}'
         )
+        lift_msg = String()
+        lift_msg.data = seg
+        self.lift_pub.publish(lift_msg)
+        return True
 
     def get_active_seg(self):
-        """
-        Determines which segment should be active based on level state.
-
-        Level patterns and active segment:
-        {f:0, m:0, b:0} → front  (f == m, front leads)
-        {f:1, m:0, b:0} → mid    (f > m, mid == b, mid catches up)
-        {f:1, m:1, b:0} → back   (f == m > b, back catches up)
-        {f:1, m:1, b:1} → front  (all equal, front leads again)
-        """
         f = self.level.get('front', 0)
         m = self.level.get('mid',   0)
         b = self.level.get('back',  0)
@@ -145,19 +168,28 @@ class RobotController(Node):
             )
             return None
 
+        # if front is at top, it can no longer lead — mid catches up
+        # if mid has also caught up to front, back catches up
+        if self.front_at_top:
+            if m < f:
+                return 'mid'
+            elif b < m:
+                return 'back'
+            else:
+                return None  # all equal, complete
+
         if f == m:
-            return 'front'   # front and mid equal — front leads next lift
+            return 'front'
         elif m == b:
-            return 'mid'     # front ahead, mid and back equal — mid catches up
+            return 'mid'
         else:
-            return 'back'    # front and mid ahead — back catches up
+            return 'back'
 
     # ── stepper callback ──────────────────────────────────────────────
 
     def on_stepper(self, msg, stp):
         self.live_steps[stp] = msg.data
 
-        # front stepper scouts stair height while lifting
         if stp == 'front' and self.state == RobotState.LIFTING:
             if self.scouting_level not in self.stair_heights:
                 measured = msg.data + self.clearance_offset
@@ -170,11 +202,20 @@ class RobotController(Node):
     # ── ultrasonic callback ───────────────────────────────────────────
 
     def on_ultrasonic(self, msg, seg):
-        distance  = msg.data
-        active    = self.get_active_seg()
+        distance = msg.data
+        active   = self.get_active_seg()
 
         if active is None:
-            return  # invalid state — sanity guard fired, don't process
+            if (self.front_at_top and
+                    self.level['front'] == self.level['mid'] == self.level['back'] and
+                    self.level['front'] > 0 and
+                    self.state != RobotState.COMPLETE):
+                self.state = RobotState.COMPLETE
+                self.stop_all()
+                self.get_logger().info(
+                    f'STAIR CLIMB COMPLETE — reached level {self.level["front"]}'
+                )
+            return
 
         # ── IDLE → ADVANCING ─────────────────────────────────────────
         if self.state == RobotState.IDLE:
@@ -190,72 +231,93 @@ class RobotController(Node):
                 self.get_logger().info(
                     f'[{seg}] hit stair | level: {self.level[seg]}'
                 )
-
-                if seg == 'front':
-                    # front always scouts — lift indefinitely until ultrasonic clears
-                    self.scouting_level = self.level['front']+1
-                    self.state          = RobotState.LIFTING
-                    self.step_up('front', 999.0)
-                    self.get_logger().info(f'--- Scouting stair {self.scouting_level} ---')
-                else:
-                    # mid or back — use stored height
-                    self.state = RobotState.LIFTING
-                    self.do_lift(seg)
+                self.state = RobotState.LIFTING
+                self.do_lift(seg)
 
         # ── LIFTING ───────────────────────────────────────────────────
         if self.state == RobotState.LIFTING and seg == active:
             if distance > self.stair_threshold:
                 self.get_logger().info(f'[{seg}] cleared — moving forward')
+                self.state = RobotState.SEGMENT_FORWARD
+                for s in self.segments:
+                    self.drive(s)
 
-                if seg == 'back':
-                    # back cleared — winch pulls it forward
+        # ── SEGMENT FORWARD ───────────────────────────────────────────
+        if self.state == RobotState.SEGMENT_FORWARD:
+            traveled = self.distance_traveled(seg)
+            self.get_logger().info(
+                f'[SF] [{seg}] dist: {distance:.1f} | traveled: {traveled:.1f}cm | '
+                f'stopped: {self.stopped[seg]} | threshold: {self.stair_threshold} | '
+                f'segment_length: {self.segment_length}'
+            )
+
+            # stop condition 1: ultrasonic detects next stair
+            if distance < self.stair_threshold and not self.stopped[seg]:
+                self.get_logger().info(f'[SF] [{seg}] STAIR DETECTED — halting')
+                self.halt(seg)
+
+            # front sees landing signal (301) — just flag it, let normal flow stop and credit level
+            if seg == 'front' and not self.front_at_top and distance > 300:
+                self.front_at_top = True
+                self.get_logger().info('[front] landing signal received — front at top')
+
+            # stop condition 2: traveled a full segment length with no stair
+            if not self.stopped[seg] and traveled >= self.segment_length:
+                self.get_logger().info(
+                    f'[SF] [{seg}] DISTANCE CUTOFF at {traveled:.1f}cm — assuming landing, halting'
+                )
+                self.halt(seg)
+
+            self.get_logger().info(
+                f'[SF] stopped state — front: {self.stopped["front"]} | '
+                f'mid: {self.stopped["mid"]} | back: {self.stopped["back"]} | '
+                f'all stopped: {all(self.stopped.values())}'
+            )
+
+            if all(self.stopped.values()):
+                self.level[active] += 1
+                next_active = self.get_active_seg()
+
+                self.get_logger().info(
+                    f'[{active}] positioned | levels: {self.level} '
+                    f'→ next active: {next_active}'
+                )
+
+                # all levels equal and front confirmed at top — complete
+                if (self.front_at_top and
+                        self.level['front'] == self.level['mid'] == self.level['back']):
+                    self.state = RobotState.COMPLETE
+                    self.stop_all()
+                    self.get_logger().info(
+                        f'STAIR CLIMB COMPLETE — reached level {self.level["front"]}'
+                    )
+                    return
+
+                if next_active == 'back':
                     self.state       = RobotState.BACK_WINCHING
                     self.winch_count = 0
                     self.fire_winch()
                 else:
-                    self.state = RobotState.SEGMENT_FORWARD
-                    for s in self.segments:
-                        self.drive(s)
-
-        # ── SEGMENT FORWARD ───────────────────────────────────────────
-        if self.state == RobotState.SEGMENT_FORWARD:
-            if distance < self.stair_threshold:
-                self.halt(seg)
-                self.stopped[seg] = True
-
-            # once the active segment has stopped, update levels and lift next
-            # ADD CHECK: if distance is beyond full bot length → adjust levels
-            if all(self.stopped.values()):  # fix: was set(stopped) == set(True)
-                self.state = RobotState.LIFTING
-                for s in self.segments:
-                    self.drive(s)
-                self.get_logger().info(
-                    f'All segments positioned | levels: {self.level} — advancing'
-                )
-                
-                previous_active = active
-                self.level[active] += 1  # update level of just-lifted segment
-                active = self.get_active_seg()  # re-evaluate active segment based on new levels
-                
-                self.get_logger().info(
-                    f'{active} lifted → next active: {active} | levels: {self.level}'
-                )
-
-                self.do_lift(active)  # lift next segment based on current active pattern
-                self.state = RobotState.LIFTING  # ensure state is set to LIFTING for next lift
+                    if self.do_lift(next_active):
+                        self.state = RobotState.LIFTING
+                    else:
+                        self.state = RobotState.IDLE
+                        self.get_logger().error(
+                            f'Lift failed for [{next_active}] — stalling | levels: {self.level}'
+                        )
 
         # ── BACK WINCHING ─────────────────────────────────────────────
         if self.state == RobotState.BACK_WINCHING:
-            self.winch_count += 1
-            if self.winch_count >= self.winch_steps:
+            elapsed = (self.get_clock().now() - self.winch_start_time).nanoseconds / 1e9
+            self.get_logger().info(f'[WINCH] elapsed: {elapsed:.2f}s / {self.winch_duration}s')
+            if elapsed >= self.winch_duration:
                 self.state = RobotState.ADVANCING
-                self.stopped['back'] = False
                 self.drive('back')
                 self.get_logger().info('Winch complete — back advancing')
 
-        # ── STAIR COMPLETE ────────────────────────────────────────────
+        # ── STAIR COMPLETE (advancing check) ─────────────────────────
         if (self.state == RobotState.ADVANCING and
-                distance > 200.0 and
+                self.front_at_top and
                 self.level['front'] == self.level['mid'] == self.level['back'] and
                 self.level['front'] > 0):
             self.state = RobotState.COMPLETE
@@ -267,7 +329,7 @@ class RobotController(Node):
         self.get_logger().info(
             f'[{seg}] dist: {distance:.1f} | active: {active} | '
             f'levels: {self.level} | state: {self.state.name} | '
-            f'heights: {self.stair_heights}'
+            f'front_at_top: {self.front_at_top} | heights: {self.stair_heights}'
         )
 
 
