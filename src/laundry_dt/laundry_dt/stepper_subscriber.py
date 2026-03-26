@@ -1,16 +1,22 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from std_msgs.msg import Float32
 
 class StepperSubcriber(Node):
     def __init__(self):
         super().__init__('stepper_subscriber')
-        self.subscriber = self.create_subscription(Twist,'/cmd_vel', self.cmd_callback,10)
+
+        self.positions = ["front","back"]
+
+        self.subscriber = {
+            pos: self.create_subscription(Float32,f'stepper/{pos}/cmd', lambda msg, p = pos: self.cmd_callback(msg,p),10)
+            for pos in self.positions
+        }
         
         self.get_logger().info("stepper subscriber started")
     
-    def cmd_callback(self, msg):
-        self.get_logger().info(f"Linear x: {msg.linear.x}, Angular z: {msg.angular.z}")
+    def cmd_callback(self, msg,p):
+        self.get_logger().info(f"{p}stepper [{msg.data}] steps")
 
 def main():
     rclpy.init()

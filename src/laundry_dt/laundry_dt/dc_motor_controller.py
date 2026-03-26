@@ -31,7 +31,6 @@ class DcMotorController(Node):
             
         
         self.cmd_publisher[p].publish(cmd)
-    
 
 def main():
     rclpy.init()

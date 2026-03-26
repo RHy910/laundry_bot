@@ -29,8 +29,12 @@ setup(
     entry_points={
         'console_scripts': [
             'ultrasonic_publisher = laundry_dt.ultrasonic_publisher:main',
+            'staircase_publisher = laundry_dt.staircase_publisher:main',
             'dc_motor_subscriber = laundry_dt.dc_motor_subscriber:main',
             'dc_motor_controller = laundry_dt.dc_motor_controller:main',
+            'stepper_controller   = laundry_dt.stepper_controller:main',
+            'stepper_subscriber   = laundry_dt.stepper_subscriber:main',
+            'robot_controller     = laundry_dt.robot_controller:main',
         ],
     },
 )

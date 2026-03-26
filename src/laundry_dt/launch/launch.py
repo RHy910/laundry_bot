@@ -5,8 +5,8 @@ def generate_launch_description():
     return LaunchDescription([
         Node(
             package='laundry_dt',
-            executable='ultrasonic_publisher',
-            name='ultrasonic_publisher'
+            executable='staircase_publisher',
+            name='staircase_publisher'
         ),
         Node(
             package='laundry_dt',
@@ -17,5 +17,20 @@ def generate_launch_description():
             package='laundry_dt',
             executable='dc_motor_subscriber',
             name='dc_motor_subscriber'
+        ),
+        Node(
+            package='laundry_dt',
+            executable='stepper_controller',
+            name='stepper_controller'
+        ),
+        Node(
+            package='laundry_dt',
+            executable='stepper_subscriber',
+            name='stepper_subscriber'
+        ),
+        Node(
+            package='laundry_dt',
+            executable='robot_controller',
+            name='robot_controller'
         ),
     ])
