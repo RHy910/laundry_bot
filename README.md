@@ -39,7 +39,6 @@ The robot is a **3-segment autonomous platform** with a detachable drum that mou
 | Node | Publishes | Subscribes To | Role |
 |---|---|---|---|
 | `ultrasonic_publisher` | `/ultrasonic/front/distance` `/ultrasonic/mid/distance` `/ultrasonic/back/distance` | — | Per-segment obstacle & stair detection |
-| `camera_publisher` | `/camera/image_raw` | — | Visual state awareness, machine door detection |
 | `robot_controller` | `/{pos}/cmd_vel` `/stepper/{pos}/cmd` | `/ultrasonic/{pos}/distance` `/stepper/{pos}/steps` | Central state machine brain |
 | `dc_motor_controller` | `/{pos}/motors/dc/status` | `/{pos}/cmd_vel` | Per-segment drive control |
 | `stepper_controller` | `/stepper/{pos}/steps` | `/stepper/{pos}/cmd`  && `mid/winch/cmd` | Per-segment precision lift control |
@@ -54,8 +53,7 @@ The robot is a **3-segment autonomous platform** with a detachable drum that mou
 
 | Component | Quantity | Role |
 |---|---|---|
-| ESP32-CAM | 1 | Visual state detection (machine door, drum alignment) |
-| HC-SR04 Ultrasonic | 3 | One per segment — obstacle avoidance + stair measurement |
+| HC-SR04 Ultrasonic | 6 | One per segment — obstacle avoidance + stair measurement |
 | DC Motors | 7 | Locomotion per segment + winch pull on mid segment (1) |
 | Stepper Motors | 2 | Precision lift mechanism per segment for stair climbing |
 
@@ -78,25 +76,12 @@ The `robot_controller` node manages a finite state machine (FSM) that governs al
 
 ```python
 class RobotState(Enum):
-    IDLE                = 0
-    MOVING_FORWARD      = 1
-    OBSTACLE_DETECTED   = 2
-    STAIR_DETECTED      = 3
-    FRONT_LIFTING       = 4
-    FRONT_ADVANCING     = 5
-    MID_LIFTING         = 6
-    MID_ADVANCING       = 7
-    BACK_LIFTING        = 8
-    BACK_ADVANCING      = 9
-    STAIR_COMPLETE      = 10
-    # --- laundry states (future) ---
-    NAVIGATING_TO_WASHER  = 11
-    ALIGNING              = 12
-    DETACHING_DRUM        = 13
-    WAITING_CYCLE         = 14
-    REATTACHING_DRUM      = 15
-    NAVIGATING_TO_DRYER   = 16
-    RETURNING_TO_USER     = 17
+    IDLE             = 0
+    ADVANCING        = 1
+    LIFTING          = 2
+    SEGMENT_FORWARD  = 3
+    BACK_WINCHING    = 4
+    COMPLETE         = 5
 ```
 
 ---
